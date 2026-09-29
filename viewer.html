@@ -59,7 +59,7 @@
 
     <script>
         // URL du worker : en local `wrangler dev`, en prod l'URL *.workers.dev
-        const API = "http://127.0.0.1:8787";
+        const API = "https://writeups-gateway.maxime-moreau-info.workers.dev/";
 
         const slug = new URLSearchParams(location.search).get("slug");
         const $ = (id) => document.getElementById(id);
