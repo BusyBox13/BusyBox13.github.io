@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Writeup</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 860px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            line-height: 1.6;
+        }
+
+        img {
+            max-width: 100%;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 1rem;
+            overflow-x: auto;
+            border-radius: 6px;
+        }
+
+        code {
+            font-family: ui-monospace, Consolas, monospace;
+        }
+
+        .error {
+            color: #b00020;
+        }
+
+        #files li {
+            margin-bottom: 1.2rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="status">Chargement…</div>
+
+    <form id="flag-form" hidden>
+        <p>Ce writeup est protégé : saisis le flag du challenge pour y accéder.</p>
+        <input id="flag-input" type="text" placeholder="flag" autocomplete="off" size="40">
+        <button type="submit">Valider</button>
+        <p id="flag-error" class="error"></p>
+    </form>
+
+    <article id="writeup" hidden></article>
+    <section id="files" hidden>
+        <h2>Fichiers joints</h2>
+        <ul></ul>
+    </section>
+
+    <script>
+        // URL du worker : en local `wrangler dev`, en prod l'URL *.workers.dev
+        const API = "http://127.0.0.1:8787";
+
+        const slug = new URLSearchParams(location.search).get("slug");
+        const $ = (id) => document.getElementById(id);
+
+        const MIME = {
+            png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+            webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf",
+        };
+        const TEXT_EXT = ["py", "txt", "c", "cpp", "h", "js", "sh", "asm", "json", "md", "rb", "php", "java", "go", "rs"];
+
+        const ext = (name) => name.split(".").pop().toLowerCase();
+
+        // base64 -> octets (atob seul casse l'UTF-8 et les binaires)
+        function b64ToBytes(b64) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+        }
+
+        // normalise un chemin relatif : "./img/a%20b.png" -> "img/a b.png"
+        function normalize(p) {
+            try { p = decodeURIComponent(p); } catch { }
+            return p.replace(/^\.\//, "");
+        }
+
+        async function loadWriteup() {
+            const token = sessionStorage.getItem("token:" + slug);
+            const res = await fetch(`${API}/api/writeup/${encodeURIComponent(slug)}`, {
+                headers: token ? { Authorization: "Bearer " + token } : {},
+            });
+
+            if (res.status === 401) {          // privé et pas (ou plus) de token valide
+                sessionStorage.removeItem("token:" + slug);
+                $("status").hidden = true;
+                $("flag-form").hidden = false;
+                return;
+            }
+            if (!res.ok) {
+                $("status").innerHTML = `<span class="error">Erreur ${res.status}</span>`;
+                return;
+            }
+            const { files } = await res.json();
+            render(files);
+        }
+
+        function render(files) {
+            // Le dossier du writeup = dossier de writeup.md
+            const md = files.find((f) => f.name === "writeup.md");
+            if (!md) { $("status").textContent = "writeup.md introuvable"; return; }
+            const baseDir = md.path.slice(0, md.path.length - "writeup.md".length);
+
+            // Index des fichiers par chemin relatif + création des blob URLs
+            const byRel = new Map();
+            for (const f of files) {
+                const rel = f.path.slice(baseDir.length);
+                const bytes = b64ToBytes(f.content);
+                byRel.set(rel, {
+                    ...f, rel, bytes,
+                    url: URL.createObjectURL(new Blob([bytes], { type: MIME[ext(f.name)] || "application/octet-stream" })),
+                });
+            }
+
+            // Markdown -> HTML nettoyé
+            const text = new TextDecoder().decode(byRel.get("writeup.md").bytes);
+            const container = $("writeup");
+            container.innerHTML = DOMPurify.sanitize(marked.parse(text));
+
+            // Remplace les chemins relatifs des images par les blob URLs
+            const used = new Set(["writeup.md"]);
+            container.querySelectorAll("img").forEach((img) => {
+                const rel = normalize(img.getAttribute("src") || "");
+                const file = byRel.get(rel);
+                if (file) { img.src = file.url; used.add(rel); }
+            });
+            // Idem pour les liens vers des fichiers du dossier
+            container.querySelectorAll("a[href]").forEach((a) => {
+                const rel = normalize(a.getAttribute("href"));
+                const file = byRel.get(rel);
+                if (file) { a.href = file.url; a.download = file.name; used.add(rel); }
+            });
+
+            // Fichiers non référencés dans le markdown : liste + aperçu du code
+            const list = $("files").querySelector("ul");
+            for (const f of byRel.values()) {
+                if (used.has(f.rel)) continue;
+                const li = document.createElement("li");
+                const a = document.createElement("a");
+                a.href = f.url; a.download = f.name; a.textContent = f.rel;
+                li.append(a);
+                if (TEXT_EXT.includes(ext(f.name))) {
+                    const pre = document.createElement("pre");
+                    const code = document.createElement("code");
+                    code.textContent = new TextDecoder().decode(f.bytes); // textContent : pas d'injection HTML
+                    pre.append(code); li.append(pre);
+                }
+                list.append(li);
+            }
+            if (list.children.length) $("files").hidden = false;
+
+            $("status").hidden = true;
+            $("flag-form").hidden = true;
+            container.hidden = false;
+        }
+
+        $("flag-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            $("flag-error").textContent = "";
+            const res = await fetch(`${API}/api/writeup/${encodeURIComponent(slug)}/unlock`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ flag: $("flag-input").value.trim() }),
+            });
+            if (res.ok) {
+                const { token } = await res.json();
+                sessionStorage.setItem("token:" + slug, token);
+                $("status").hidden = false; $("status").textContent = "Chargement…";
+                loadWriteup();
+            } else if (res.status === 429) {
+                $("flag-error").textContent = "Trop de tentatives, réessaie plus tard.";
+            } else {
+                $("flag-error").textContent = "Flag invalide.";
+            }
+        });
+
+        if (!slug) $("status").textContent = "Paramètre ?slug= manquant";
+        else loadWriteup();
+    </script>
+</body>
+
+</html>
